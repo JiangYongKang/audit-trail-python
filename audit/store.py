@@ -82,11 +82,29 @@ class AuditStore:
     # ---- 写入 ----
 
     def append(self, record: AuditRecord) -> None:
-        """追加一条记录，失败时按配置重试，最终失败抛 OSError。"""
+        """追加一条记录，失败时按配置重试，最终失败抛 OSError。
+
+        幂等：若链尾已是该记录（上次写入在 fsync 阶段失败但内容已落盘），
+        直接视为成功，避免重试产生重复行。
+        """
         line = record_to_line(record) + "\n"
         with self._lock:
+            tail = self.tail()
+            if tail and tail.seq == record.seq and tail.record_hash == record.record_hash:
+                return
             path = self._current_writable_segment(len(line))
             self._write_with_retry(path, line)
+
+    def _last_line_equals(self, line: str) -> bool:
+        segs = self._segments()
+        if not segs:
+            return False
+        last = ""
+        with open(segs[-1], encoding="utf-8") as f:
+            for raw in f:
+                if raw.strip():
+                    last = raw
+        return last == line
 
     def _current_writable_segment(self, incoming: int) -> Path:
         segs = self._segments()
@@ -109,6 +127,10 @@ class AuditStore:
             except OSError as exc:  # 不静默吞掉：记录日志并重试
                 last_exc = exc
                 logger.error("审计写入失败 path=%s 第 %d/%d 次: %s", path, attempt, attempts, exc)
+                # 失败可能发生在 fsync 阶段（内容已写盘）：重试前去重
+                if self._last_line_equals(line):
+                    logger.warning("审计写入实际已落盘，跳过重试: %s", path)
+                    return
                 if attempt < attempts:
                     time.sleep(self._config.retry_backoff_s * attempt)
         raise OSError(f"审计写入在 {attempts} 次尝试后仍失败: {path}") from last_exc
