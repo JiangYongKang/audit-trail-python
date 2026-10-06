@@ -45,6 +45,7 @@ def record_from_line(line: str) -> AuditRecord:
         idempotency_key=ev.get("idempotency_key"),
         sensitivity=Sensitivity(ev["sensitivity"]),
         occurred_at=ev["occurred_at"],
+        source=ev.get("source", ""),
         details=ev.get("details", {}),
     )
     return AuditRecord(
@@ -191,6 +192,21 @@ class AuditStore:
                 return 0
 
             last_removed = removed[-1]
+            prior_anchor = next((r for r in records if r.anchor), None)
+            if prior_anchor is not None:
+                removed_from_seq = int(
+                    prior_anchor.event.details.get("removed_up_to_seq", prior_anchor.seq - 1)
+                ) + 1
+                removed_from_ts = prior_anchor.event.details.get(
+                    "removed_from_occurred_at", removed[0].event.occurred_at
+                )
+                cumulative_count = len(removed) + int(
+                    prior_anchor.event.details.get("removed_count", 0)
+                )
+            else:
+                removed_from_seq = removed[0].seq
+                removed_from_ts = removed[0].event.occurred_at
+                cumulative_count = len(removed)
             anchor = AuditRecord(
                 seq=last_removed.seq,
                 event=AuditEvent(
@@ -202,9 +218,11 @@ class AuditStore:
                     occurred_at=now,
                     details={
                         "removed_up_to_seq": last_removed.seq,
-                        "removed_count": len(removed) + sum(
-                            1 for k in kept if k.anchor and k.seq < last_removed.seq
-                        ),
+                        "removed_count": cumulative_count,
+                        "removed_from_seq": removed_from_seq,
+                        "removed_from_occurred_at": removed_from_ts,
+                        "removed_up_to_occurred_at": last_removed.event.occurred_at,
+                        "compacted_at": now,
                     },
                 ),
                 prev_hash=last_removed.prev_hash,

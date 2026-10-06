@@ -14,6 +14,8 @@ import time
 from .config import AuditConfig
 from .hashchain import GENESIS_HASH, compute_record_hash, verify_chain
 from .models import AuditEvent, AuditRecord, VerifyResult
+from .query import Page, QueryFilter
+from .query import query as query_snapshot
 from .redaction import redact_event
 from .store import AuditStore
 
@@ -24,7 +26,9 @@ class AuditService:
     def __init__(self, config: AuditConfig | None = None, store: AuditStore | None = None) -> None:
         self._config = config or AuditConfig()
         self._store = store or AuditStore(self._config)
-        self._lock = threading.Lock()
+        # RLock + Condition 共用同一把锁：跟读等待与写入/清理通知互斥且可重入
+        self._lock = threading.RLock()
+        self._cond = threading.Condition(self._lock)
         tail = self._store.tail()
         self._seq = tail.seq if tail else 0
         self._prev_hash = tail.record_hash if tail else GENESIS_HASH
@@ -60,6 +64,7 @@ class AuditService:
             if key:
                 self._seen_keys[key] = seq
                 self._records_by_key[key] = record
+            self._cond.notify_all()  # 唤醒跟读器：链尾已推进
             return record
 
     def verify(self) -> VerifyResult:
@@ -70,6 +75,34 @@ class AuditService:
         """读取当前全部记录。"""
         return self._store.read_all()
 
+    def snapshot(self) -> list[AuditRecord]:
+        """在服务锁内取一致性快照（与写入/清理互斥）。"""
+        with self._lock:
+            return self._store.read_all()
+
+    def query(
+        self,
+        flt: QueryFilter | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        descending: bool = False,
+    ) -> Page:
+        """按条件分页查询。快照在服务锁内取得，并发写入/清理下读一致。"""
+        with self._lock:
+            return query_snapshot(
+                self._store.read_all(), flt,
+                limit=limit, cursor=cursor, descending=descending,
+            )
+
     def cleanup(self, now: float) -> int:
-        """触发保留期清理（只压缩链首前缀，不影响内存中的链尾状态）。"""
-        return self._store.cleanup_expired(now)
+        """触发保留期清理（只压缩链首前缀，不影响内存中的链尾状态）。
+
+        清理在服务锁内进行，与查询/跟读互斥；清理后唤醒跟读器，
+        游标落入被清理区段的跟读器会在下一次读取时得到明确错误。
+        """
+        with self._lock:
+            try:
+                return self._store.cleanup_expired(now)
+            finally:
+                self._cond.notify_all()

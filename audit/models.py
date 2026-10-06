@@ -35,6 +35,7 @@ class AuditEvent:
     idempotency_key: str | None = None
     sensitivity: Sensitivity = Sensitivity.LOW
     occurred_at: float = 0.0
+    source: str = ""  # 事件来源（入口标识，如 http / job / cli），空串视为“未标注”
     details: dict[str, Any] = field(default_factory=dict)
 
 
