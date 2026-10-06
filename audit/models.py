@@ -36,6 +36,7 @@ class AuditEvent:
     sensitivity: Sensitivity = Sensitivity.LOW
     occurred_at: float = 0.0
     details: dict[str, Any] = field(default_factory=dict)
+    source: str = ""  # 事件来源（如 http 入口采集、直接写入），缺省为空
 
 
 @dataclass(frozen=True)

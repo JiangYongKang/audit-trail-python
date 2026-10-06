@@ -70,6 +70,10 @@ class AuditService:
         """读取当前全部记录。"""
         return self._store.read_all()
 
+    def snapshot_records(self) -> list[AuditRecord]:
+        """读取一份一致性快照（导出用：锁内瞬时硬链接，之后慢慢读）。"""
+        return self._store.snapshot_records()
+
     def cleanup(self, now: float) -> int:
         """触发保留期清理（只压缩链首前缀，不影响内存中的链尾状态）。"""
         return self._store.cleanup_expired(now)

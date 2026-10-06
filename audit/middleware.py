@@ -45,6 +45,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             idempotency_key=request.headers.get("x-idempotency-key"),
             sensitivity=Sensitivity.LOW,
             details={"method": request.method, "status": response.status_code},
+            source="http",
         )
         self._service.record(event)
         response.headers["x-correlation-id"] = correlation_id

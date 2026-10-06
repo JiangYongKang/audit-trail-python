@@ -46,6 +46,7 @@ def record_from_line(line: str) -> AuditRecord:
         sensitivity=Sensitivity(ev["sensitivity"]),
         occurred_at=ev["occurred_at"],
         details=ev.get("details", {}),
+        source=ev.get("source", ""),
     )
     return AuditRecord(
         seq=payload["seq"],
@@ -150,6 +151,37 @@ class AuditStore:
             records.sort(key=lambda r: r.seq)
             return records
 
+    def snapshot_records(self) -> list[AuditRecord]:
+        """在锁内把段文件快照到临时目录再读出（导出大数据时不长时间占锁）。
+
+        硬链接优先（与拷贝调用方看到的内容一致），跨文件系统自动回退拷贝。
+        """
+        import shutil
+
+        snap_dir = Path(tempfile.mkdtemp(prefix="audit-export-"))
+        try:
+            with self._lock:
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                for seg in self._segments():
+                    target = snap_dir / seg.name
+                    try:
+                        os.link(seg, target)
+                    except OSError:
+                        shutil.copy2(seg, target)
+            records: list[AuditRecord] = []
+            for seg in sorted(snap_dir.glob("segment-*.jsonl")):
+                with open(seg, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            records.append(record_from_line(line))
+            records.sort(key=lambda r: r.seq)
+            return records
+        finally:
+            for seg in snap_dir.glob("segment-*.jsonl"):
+                seg.unlink()
+            snap_dir.rmdir()
+
     def tail(self) -> AuditRecord | None:
         """返回最后一条记录（用于重启后恢复链头），无记录返回 None。"""
         with self._lock:
@@ -191,6 +223,19 @@ class AuditStore:
                 return 0
 
             last_removed = removed[-1]
+            # 跨多次清理累积：保留“最早被移除记录的发生时间”与累计移除条数，
+            # 供查询判断时间范围是否命中已清理区段。
+            prior_anchors = [k for k in kept if k.anchor]
+            prior_from_ts = [
+                k.event.details.get("removed_from_ts") for k in prior_anchors
+            ]
+            prior_from_ts = [ts for ts in prior_from_ts if ts is not None]
+            removed_from_ts = min(
+                [r.event.occurred_at for r in removed] + prior_from_ts
+            ) if prior_from_ts or removed else removed[0].event.occurred_at
+            accumulated = len(removed) + sum(
+                k.event.details.get("removed_count", 0) for k in prior_anchors
+            )
             anchor = AuditRecord(
                 seq=last_removed.seq,
                 event=AuditEvent(
@@ -202,9 +247,9 @@ class AuditStore:
                     occurred_at=now,
                     details={
                         "removed_up_to_seq": last_removed.seq,
-                        "removed_count": len(removed) + sum(
-                            1 for k in kept if k.anchor and k.seq < last_removed.seq
-                        ),
+                        "removed_from_ts": removed_from_ts,
+                        "removed_up_to_ts": last_removed.event.occurred_at,
+                        "removed_count": accumulated,
                     },
                 ),
                 prev_hash=last_removed.prev_hash,

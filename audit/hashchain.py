@@ -21,10 +21,15 @@ def _canonical(payload: dict[str, Any]) -> str:
 
 
 def event_to_payload(record: AuditRecord) -> dict[str, Any]:
-    """把记录序列化为规范字典（枚举取值、键排序由 _canonical 保证）。"""
+    """把记录序列化为规范字典（枚举取值、键排序由 _canonical 保证）。
+
+    兼容：source 为空（旧格式记录）时不写入载荷，因此旧记录重算哈希与落盘一致。
+    """
     event = asdict(record.event)
     event["outcome"] = record.event.outcome.value
     event["sensitivity"] = record.event.sensitivity.value
+    if not event.get("source"):
+        event.pop("source", None)
     return {
         "seq": record.seq,
         "anchor": record.anchor,
